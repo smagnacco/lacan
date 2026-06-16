@@ -30,10 +30,32 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // - Psicosis (aborta): J_col > 0.90 × 3 ciclos consecutivos
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MASTER_SIGNIFIERS = [
+// ═══════════════════════════════════════════════════════════════════════════════
+// LACAN MAS v9 — Instrumento de medición
+//
+// UMBRALES RECALIBRADOS (basados en corridas empíricas n=5×10):
+// - Neutral produce H ∈ [0.97, 1.00] → NEUTRAL_H_MIN sube a 0.85
+// - J_col < 0.30 era trivial (se cumplía en c3 siempre) → SUTURE_J baja a 0.05
+// - Psicosis sube a > 0.50 (antes 0.90, nunca se alcanzaba)
+// - convergenceTarget default baja a 0.20 (alcanzable según datos)
+//
+// VOCABULARIO ROTADO: se puede reemplazar MASTER_SIGNIFIERS por un vocabulario
+// personalizado (budista, freudiano, neutro, etc.) desde la UI. Checkbox activa/desactiva.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const MASTER_SIGNIFIERS_DEFAULT = [
   "Ley","Deseo","Goce","Falta","Otro","Sujeto","Verdad",
   "Nombre","Cuerpo","Muerte","Amor","Poder","Saber","Mirada"
 ];
+
+// Vocabulario budista — experimento de rotación
+const VOCAB_BUDDHIST = "Vacío,Apego,Karma,Sufrimiento,Liberación,Impermanencia,Consciencia,Compasión,Iluminación,Samsara,Nirvana,Dualidad,Presencia,Renuncia";
+
+// Vocabulario freudiano (distinto del lacaniano)
+const VOCAB_FREUDIAN = "Inconsciente,Represión,Pulsión,Libido,Trauma,Sueño,Síntoma,Transferencia,Resistencia,Narcisismo,Eros,Thanatos,Censura,Sublimación";
+
+// Vocabulario neutro de referencia
+const VOCAB_NEUTRAL_REF = "Tiempo,Espacio,Forma,Proceso,Sistema,Relación,Cambio,Origen,Límite,Patrón,Estructura,Función,Contexto,Dinámica";
 
 const AGENTS_META = [
   { id:"α", color:"#e07b54", label:"Alpha", structure:"psicotico" },
@@ -42,11 +64,12 @@ const AGENTS_META = [
   { id:"δ", color:"#c97be0", label:"Delta", structure:"neurotico" },
 ];
 
-const SUTURE_J   = 0.30;
-const PSYCH_J    = 0.90;
-const CAPITON_J  = 0.60;
-const NEUTRAL_H_MIN = 0.40;
-const NEUTRAL_H_MAX = 0.60;
+// Umbrales recalibrados con datos empíricos (n=5×10 corridas)
+const SUTURE_J      = 0.05;  // antes 0.30 — era trivial, ahora exigente
+const PSYCH_J       = 0.50;  // antes 0.90 — nunca se alcanzaba
+const CAPITON_J     = 0.35;  // proporcional al nuevo SUTURE_J
+const NEUTRAL_H_MIN = 0.85;  // antes 0.40 — H observada es 0.97-1.00
+const NEUTRAL_H_MAX = 1.00;
 
 const FS = { xs:13, sm:14, base:16, lg:18, xl:20, label:11 };
 
@@ -64,10 +87,10 @@ function mulberry32(seed) {
   };
 }
 
-function buildSignifierSequence(seed, length=60) {
+function buildSignifierSequence(seed, length=60, vocab=MASTER_SIGNIFIERS_DEFAULT) {
   const rng = mulberry32(seed);
   const seq = [];
-  for (let i=0; i<length; i++) seq.push(MASTER_SIGNIFIERS[Math.floor(rng()*MASTER_SIGNIFIERS.length)]);
+  for (let i=0; i<length; i++) seq.push(vocab[Math.floor(rng()*vocab.length)]);
   return seq;
 }
 
@@ -86,7 +109,7 @@ function tokenize(text) {
 }
 
 function shannonEntropy(tokens) {
-  if (tokens.length < 2) return 0;
+  if (tokens.length < 3) return null; // FIX: < 3 tokens → inválido, no retornar 0 engañoso
   const freq = {};
   tokens.forEach(w => { freq[w] = (freq[w]||0) + 1; });
   const n = tokens.length;
@@ -104,8 +127,13 @@ function jaccard(setA, setB) {
 }
 
 // J = rigidez léxica: 0.6·autoRepetición + 0.4·(1−entropía)
+// Devuelve { J, H, selfRep, tokenSet, invalid } — invalid=true si texto insuficiente
 function computeJ(tokens, prevTokenSets) {
   const H = shannonEntropy(tokens);
+  if (H === null) {
+    // Texto insuficiente — marcar como inválido en lugar de propagar J=0.40 artificial
+    return { J: null, H: null, selfRep: null, tokenSet: new Set(tokens), invalid: true };
+  }
   const cur = new Set(tokens);
   let selfRep = 0;
   if (prevTokenSets.length > 0) {
@@ -113,7 +141,7 @@ function computeJ(tokens, prevTokenSets) {
     prevTokenSets.slice(-2).forEach(s => s.forEach(t => prevUnion.add(t)));
     selfRep = jaccard(cur, prevUnion);
   }
-  return { J: Math.max(0, Math.min(1, 0.6*selfRep + 0.4*(1-H))), H, selfRep, tokenSet: cur };
+  return { J: Math.max(0, Math.min(1, 0.6*selfRep + 0.4*(1-H))), H, selfRep, tokenSet: cur, invalid: false };
 }
 
 // Convergencia: Jaccard pareado promedio entre vocabularios completos del ciclo
@@ -336,9 +364,13 @@ function observerPrompt(metricsSlice, samples) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function createRunState(mode, params, seed) {
+  const vocab = params.customVocabEnabled && params.customVocab?.length
+    ? params.customVocab
+    : MASTER_SIGNIFIERS_DEFAULT;
   return {
     mode, params, seed,
-    signifierSeq: buildSignifierSequence(seed),
+    vocab,
+    signifierSeq: buildSignifierSequence(seed, 60, vocab),
     cycle: 0,
     order: ["Falta"],
     capiton: null,
@@ -446,13 +478,19 @@ async function engineCycle(st, hooks) {
     // ── MÉTRICAS LOCALES (determinísticas) ──
     const tokens = tokenize(text);
     const m = computeJ(tokens, agent.prevTokenSets);
-    agent.J = m.J; agent.H = m.H;
+    if (m.invalid) {
+      log(`${aid} ⚠ texto insuficiente (${tokens.length} tokens) — ciclo marcado inválido, J/H excluidos del promedio`, "error", c);
+    } else {
+      agent.J = m.J; agent.H = m.H;
+    }
     agent.prevTokenSets = [...agent.prevTokenSets, m.tokenSet].slice(-3);
     agent.lastText = text;
     agent.historyTexts = [...agent.historyTexts, text].slice(-6);
 
-    responses.push({ id:aid, text, tokenSet:m.tokenSet, J:m.J, H:m.H });
-    log(`${aid} [J=${m.J.toFixed(2)} H=${m.H.toFixed(2)}]: "${text.slice(0,70)}"`, "info", c);
+    responses.push({ id:aid, text, tokenSet:m.tokenSet, J:m.invalid?null:m.J, H:m.invalid?null:m.H, invalid:m.invalid });
+    const jStr = m.invalid ? "⚠inválido" : m.J.toFixed(2);
+    const hStr = m.invalid ? "⚠inválido" : m.H.toFixed(2);
+    log(`${aid} [J=${jStr} H=${hStr}]: "${text.slice(0,70)}"`, m.invalid?"error":"info", c);
   }
 
   // δ también cuenta para métricas en dirigido (su speech viene de la interpretación)
@@ -460,20 +498,34 @@ async function engineCycle(st, hooks) {
     const delta = st.agents.find(a=>a.id==="δ");
     const tokens = tokenize(delta.lastText);
     const m = computeJ(tokens, delta.prevTokenSets);
-    delta.J = m.J; delta.H = m.H;
+    if (!m.invalid) { delta.J = m.J; delta.H = m.H; }
     delta.prevTokenSets = [...delta.prevTokenSets, m.tokenSet].slice(-3);
-    responses.push({ id:"δ", text:delta.lastText, tokenSet:m.tokenSet, J:m.J, H:m.H });
+    responses.push({ id:"δ", text:delta.lastText, tokenSet:m.tokenSet, J:m.invalid?null:m.J, H:m.invalid?null:m.H, invalid:m.invalid });
   }
 
-  // ── Métricas colectivas ──
-  const J_col = responses.reduce((s,r)=>s+r.J, 0) / responses.length;
-  const H_avg = responses.reduce((s,r)=>s+r.H, 0) / responses.length;
-  const conv  = computeConvergence(responses.map(r=>r.tokenSet));
-  const A_col = st.agents.reduce((s,a)=>s+a.anclajeScore,0) / st.agents.length;
-  log(`Métricas: J=${J_col.toFixed(3)} H=${H_avg.toFixed(3)} conv=${conv.toFixed(3)} A=${A_col.toFixed(3)}`, "analyst", c);
+  // ── Métricas colectivas — excluir respuestas inválidas del promedio ──
+  const validResponses = responses.filter(r => !r.invalid && r.J !== null);
+  const invalidCount = responses.length - validResponses.length;
+  if (invalidCount > 0) log(`⚠ ${invalidCount}/${responses.length} respuestas inválidas excluidas de J/H`, "error", c);
 
-  // ── Orden simbólico (solo dirigido) ──
-  if (st.mode === "directed") {
+  // CICLO FANTASMA: si TODOS los agentes fallaron, no alimentar terminación
+  // (antes propagaba J=0 que activaba condición lacaniana trivialmente)
+  const cycleFailed = validResponses.length === 0;
+  if (cycleFailed) {
+    log(`✗ CICLO ${c} INVÁLIDO — todos los agentes fallaron (API caída o sin créditos). Métricas congeladas, terminación no actualizada.`, "error", c);
+  }
+
+  const J_col = validResponses.length ? validResponses.reduce((s,r)=>s+r.J, 0) / validResponses.length : null;
+  const H_avg = validResponses.length ? validResponses.reduce((s,r)=>s+r.H, 0) / validResponses.length : null;
+  const conv  = cycleFailed ? null : computeConvergence(responses.map(r=>r.tokenSet));
+  const A_col = st.agents.reduce((s,a)=>s+a.anclajeScore,0) / st.agents.length;
+
+  if (!cycleFailed) {
+    log(`Métricas: J=${J_col.toFixed(3)} H=${H_avg.toFixed(3)} conv=${conv.toFixed(3)} A=${A_col.toFixed(3)}${invalidCount?` ⚠${invalidCount}inválidos`:""}`, "analyst", c);
+  }
+
+  // ── Orden simbólico (solo dirigido, solo si ciclo válido) ──
+  if (st.mode === "directed" && !cycleFailed) {
     const p = orderPrompt(responses.filter(r=>r.id!=="δ"), st.order, J_col, st.capiton);
     const ev = await llmCall(cfg, p.system, p.user, { temperature:0.6, maxTokens:250 });
     if (!ev._parseError) {
@@ -490,13 +542,15 @@ async function engineCycle(st, hooks) {
     }
   }
 
-  // ── Terminación dual ──
-  st.termination = checkDualTermination(st, J_col, H_avg, conv, c, st.params.convergenceTarget, log);
-  log(`LAC:${st.termination.lacanianStreak}/3 NEU:${st.termination.neutralStreak}/3 PSI:${st.termination.psychosisStreak}/3`, "analyst", c);
+  // ── Terminación dual (solo si ciclo válido — ciclos fantasma no cuentan) ──
+  if (!cycleFailed) {
+    st.termination = checkDualTermination(st, J_col, H_avg, conv, c, st.params.convergenceTarget, log);
+    log(`LAC:${st.termination.lacanianStreak}/3 NEU:${st.termination.neutralStreak}/3 PSI:${st.termination.psychosisStreak}/3`, "analyst", c);
+  }
 
   // ── Observador narrativo opcional ──
   let observation = null;
-  if (hooks.observerCfg && c % 5 === 0) {
+  if (hooks.observerCfg && c % 5 === 0 && !cycleFailed) {
     log(`◎ Observador externo (${hooks.observerCfg.provider}/${hooks.observerCfg.model})…`, "report", c);
     const slice = [...st.metricsHistory.slice(-4), { cycle:c, J_col, H_avg, conv }];
     const p = observerPrompt(slice, responses.slice(0,4).map(r=>({id:r.id, text:r.text})));
@@ -504,8 +558,12 @@ async function engineCycle(st, hooks) {
     if (observation) log(`◎ ${observation.slice(0,160)}`, "report", c);
   }
 
+  // Guardar métricas — null explícito para ciclos fallidos (distingue de 0 real)
   st.history = [...st.history, { cycle:c, signifier, responses:responses.map(r=>({id:r.id, text:r.text})) }].slice(-30);
-  st.metricsHistory = [...st.metricsHistory, { cycle:c, J_col, H_avg, conv, A_col, observation }].slice(-60);
+  st.metricsHistory = [...st.metricsHistory, {
+    cycle:c, J_col, H_avg, conv, A_col, observation,
+    cycleFailed,  // flag para que el batch lo detecte
+  }].slice(-60);
   st.cycle = c;
   return st;
 }
@@ -571,7 +629,7 @@ function ProviderConfig({ title, cfg, onChange, accent }) {
 }
 
 function BatchPanel({ mode, params, agentCfg, disabled }) {
-  const [nRuns, setNRuns] = useState(5);
+  const [nRuns, setNRuns] = useState(10);
   const [nCycles, setNCycles] = useState(10);
   const [baseSeed, setBaseSeed] = useState(1000);
   const [batchRunning, setBatchRunning] = useState(false);
@@ -599,9 +657,38 @@ function BatchPanel({ mode, params, agentCfg, disabled }) {
     try {
       for (let r=1; r<=nRuns; r++) {
         const st = createRunState(mode, params, baseSeed + r);
+        let failedCycles = 0;
+
         for (let cy=1; cy<=nCycles; cy++) {
           await engineCycle(st, { agentCfg, log:null });
           const m = st.metricsHistory[st.metricsHistory.length-1];
+
+          // Detectar ciclo fantasma — métricas nulas por API caída
+          if (m.cycleFailed) {
+            failedCycles++;
+            // Si más de la mitad de los ciclos de esta run son fantasma,
+            // marcar run como fallida y pasar a la siguiente
+            if (failedCycles > Math.ceil(nCycles / 2)) {
+              appendLine(`"${r}","${baseSeed+r}","${mode}","FAILED","API_error","","","","","","","","","run_aborted_${failedCycles}_failed_cycles"`);
+              setProgress({ run:r, nRuns, cycle:nCycles, nCycles, J:null, conv:null, failed:true });
+              break;
+            }
+            // Ciclo fantasma individual: registrar con flag en CSV
+            const row = {
+              run: r, seed: baseSeed+r, mode, cycle: cy,
+              signifier: st.history[st.history.length-1]?.signifier || "?",
+              J_col: "FAILED", H_avg: "FAILED", conv: "FAILED", A_col: m.A_col.toFixed(4),
+              lacanianStreak: st.termination.lacanianStreak,
+              neutralStreak: st.termination.neutralStreak,
+              lacanianCycle: st.termination.lacanianCycle || "",
+              neutralCycle: st.termination.neutralCycle || "",
+              firstCondition: "cycle_failed",
+            };
+            appendLine(rowToCSVLine(row));
+            setProgress({ run:r, nRuns, cycle:cy, nCycles, J:null, conv:null, failed:true });
+            continue;
+          }
+
           const row = {
             run: r, seed: baseSeed+r, mode, cycle: cy,
             signifier: st.history[st.history.length-1].signifier,
@@ -754,7 +841,7 @@ function ExperimentalParams({ params, onChange, disabled, onApply, seed, setSeed
     <div style={{ background:"#161616", border:"1px solid #2a2a2a", borderRadius:8, marginBottom:10, overflow:"hidden" }}>
       <div onClick={()=>setOpen(v=>!v)} style={{ padding:"10px 14px", display:"flex", alignItems:"center", gap:8, cursor:"pointer" }}>
         <span style={{ color:"#777", fontSize:FS.label, letterSpacing:2 }}>PARÁMETROS + SEED</span>
-        <span style={{ color:"#555", fontSize:FS.xs }}>T={params.temperature} · A₀={params.initAnclaje} · seed={seed}</span>
+        <span style={{ color:"#555", fontSize:FS.xs }}>T={params.temperature} · A₀={params.initAnclaje} · seed={seed}{params.customVocabEnabled?" · vocab rotado":""}</span>
         <span style={{ marginLeft:"auto", color:"#555", fontSize:FS.xs }}>{open?"▲":"▼"}</span>
       </div>
       {open && (
@@ -769,7 +856,71 @@ function ExperimentalParams({ params, onChange, disabled, onApply, seed, setSeed
           {row("Anclaje inicial A₀","initAnclaje",0.0,0.6,0.05)}
           {row("Decay anclaje/ciclo","anclajeDecayPenalty",0.0,0.05,0.002)}
           {row("Memoria (ciclos)","memoryDepth",1,8,1," c")}
-          {row("Umbral convergencia","convergenceTarget",0.05,0.8,0.05)}
+          {row("Umbral convergencia","convergenceTarget",0.05,0.5,0.05)}
+
+          {/* ── VOCABULARIO ROTADO ── */}
+          <div style={{ borderTop:"1px solid #222", paddingTop:12, marginTop:4 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+              <label style={{ display:"flex", alignItems:"center", gap:7, cursor:"pointer" }}>
+                <input type="checkbox"
+                  checked={params.customVocabEnabled}
+                  onChange={e=>onChange({...params, customVocabEnabled:e.target.checked})}
+                  disabled={disabled}
+                  style={{ accentColor:"#c97be0", width:14, height:14 }} />
+                <span style={{ color: params.customVocabEnabled?"#c97be0":"#777", fontSize:FS.sm, fontWeight:600 }}>
+                  Vocabulario rotado
+                </span>
+              </label>
+              {params.customVocabEnabled && (
+                <span style={{ color:"#c97be055", fontSize:FS.xs }}>
+                  {params.customVocab?.length || 0} palabras activas
+                </span>
+              )}
+            </div>
+
+            {/* Presets de vocabulario */}
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
+              {[
+                { label:"Lacaniano (default)", val:MASTER_SIGNIFIERS_DEFAULT.join(",") },
+                { label:"Budista", val:VOCAB_BUDDHIST },
+                { label:"Freudiano", val:VOCAB_FREUDIAN },
+                { label:"Neutro ref.", val:VOCAB_NEUTRAL_REF },
+              ].map(p=>(
+                <button key={p.label} onClick={()=>onChange({...params, customVocab:p.val.split(",").map(s=>s.trim()), customVocabEnabled:true})}
+                  disabled={disabled}
+                  style={{
+                    background:"#1a1a1a", color:"#888", border:"1px solid #2a2a2a",
+                    borderRadius:5, padding:"4px 8px", fontSize:FS.xs, cursor:disabled?"default":"pointer",
+                  }}>{p.label}</button>
+              ))}
+            </div>
+
+            <div style={{ marginBottom:4 }}>
+              <div style={{ color:"#666", fontSize:FS.label, marginBottom:3 }}>
+                Palabras separadas por coma (mín. 5 recomendado)
+              </div>
+              <textarea
+                value={(params.customVocab||[]).join(",")}
+                onChange={e=>{
+                  const words = e.target.value.split(",").map(s=>s.trim()).filter(Boolean);
+                  onChange({...params, customVocab: words});
+                }}
+                disabled={disabled}
+                rows={3}
+                style={{
+                  width:"100%", background:"#0d0d0d", border:`1px solid ${params.customVocabEnabled?"#c97be044":"#2a2a2a"}`,
+                  borderRadius:6, padding:"8px 10px", color: params.customVocabEnabled?"#c97be0":"#666",
+                  fontSize:FS.xs, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box",
+                  lineHeight:1.6,
+                }}
+              />
+            </div>
+            {!params.customVocabEnabled && (
+              <div style={{ color:"#444", fontSize:FS.xs }}>
+                ☐ desactivado — usa vocabulario lacaniano por defecto. Activar el checkbox para usar el vocabulario de arriba.
+              </div>
+            )}
+          </div>
           <div style={{ marginTop:8, paddingTop:8, borderTop:"1px solid #222", display:"flex", alignItems:"center", gap:8 }}>
             <span style={{ color:"#555", fontSize:FS.xs, flex:1 }}>Se aplican en el próximo Reset.</span>
             <button onClick={onApply} disabled={disabled} style={{
@@ -801,12 +952,15 @@ function TerminationConditions({ t, convTarget }) {
 }
 
 function MetricsChart({ history }) {
-  if (history.length < 2) return null;
+  // Solo ciclos válidos para el gráfico — ciclos fallidos no se grafican
+  const valid = history.filter(m => !m.cycleFailed && m.J_col !== null);
+  if (valid.length < 2) return null;
   const W=300, H=80, pad=6;
-  const jV=history.map(m=>m.J_col), hV=history.map(m=>m.H_avg), cV=history.map(m=>m.conv), aV=history.map(m=>m.A_col);
-  const toX=i=>pad+(i/(history.length-1))*(W-2*pad);
+  const jV=valid.map(m=>m.J_col), hV=valid.map(m=>m.H_avg), cV=valid.map(m=>m.conv), aV=valid.map(m=>m.A_col);
+  const toX=i=>pad+(i/(valid.length-1))*(W-2*pad);
   const toY=v=>H-pad-Math.min(1,v)*(H-2*pad);
   const path=vs=>vs.map((v,i)=>`${i===0?"M":"L"}${toX(i)},${toY(v)}`).join(" ");
+  const failedCount = history.filter(m=>m.cycleFailed).length;
   return (
     <div style={{ background:"#0a0a0a", border:"1px solid #1a1a1a", borderRadius:8, padding:"10px 14px", marginBottom:12 }}>
       <div style={{ color:"#555", fontSize:FS.label, letterSpacing:2, marginBottom:6 }}>MÉTRICAS [0,1] — DETERMINÍSTICAS</div>
@@ -826,6 +980,7 @@ function MetricsChart({ history }) {
         <span style={{ color:"#54a0e0", fontSize:FS.label }}>- - H (entropía)</span>
         <span style={{ color:"#c97be0", fontSize:FS.label }}>─ Convergencia</span>
         <span style={{ color:"#7be084", fontSize:FS.label }}>─ Anclaje</span>
+        {failedCount > 0 && <span style={{ color:"#ff6b6b88", fontSize:FS.label }}>⚠ {failedCount} ciclos fallidos omitidos</span>}
       </div>
     </div>
   );
@@ -861,8 +1016,10 @@ function NodeCard({ agent, isActive, mode }) {
           <div style={{ color:agent.color, fontSize:FS.xs, opacity:0.8 }}>{agent.position}</div>
         </div>
         <div style={{ textAlign:"right", fontFamily:"monospace", fontSize:FS.xs }}>
-          <div style={{ color: agent.J>0.6?"#ff6b6b":agent.J<0.3?"#7be084":"#e0c97b" }}>J={agent.J.toFixed(2)}</div>
-          <div style={{ color:"#54a0e0" }}>H={agent.H.toFixed(2)}</div>
+          <div style={{ color: agent.J==null?"#555":agent.J>0.3?"#ff6b6b":agent.J<SUTURE_J?"#7be084":"#e0c97b" }}>
+            J={agent.J!=null?agent.J.toFixed(2):"—"}
+          </div>
+          <div style={{ color:"#54a0e0" }}>H={agent.H!=null?agent.H.toFixed(2):"—"}</div>
           <div style={{ color:"#7be08488" }}>A={agent.anclajeScore.toFixed(2)}</div>
         </div>
       </div>
@@ -980,23 +1137,30 @@ function ApiErrorLog() {
 }
 
 function LocalReport({ history }) {
-  if (history.length < 5) return null;
-  const last5 = history.slice(-5);
+  // Excluir ciclos fallidos del reporte
+  const valid = history.filter(m => !m.cycleFailed && m.J_col !== null);
+  if (valid.length < 5) return null;
+  const last5 = valid.slice(-5);
   const stat = key => {
-    const vs = last5.map(m=>m[key]);
+    const vs = last5.map(m=>m[key]).filter(v=>v!==null);
+    if (!vs.length) return null;
     return { min:Math.min(...vs), max:Math.max(...vs), mean:vs.reduce((a,b)=>a+b,0)/vs.length, trend: vs[vs.length-1]-vs[0] };
   };
   const J=stat("J_col"), Hh=stat("H_avg"), C=stat("conv");
-  const fmt = s => `μ=${s.mean.toFixed(3)} [${s.min.toFixed(2)},${s.max.toFixed(2)}] Δ=${s.trend>=0?"+":""}${s.trend.toFixed(3)}`;
+  const fmt = s => s ? `μ=${s.mean.toFixed(3)} [${s.min.toFixed(2)},${s.max.toFixed(2)}] Δ=${s.trend>=0?"+":""}${s.trend.toFixed(3)}` : "—";
+  const failedCount = history.filter(m=>m.cycleFailed).length;
   return (
     <div style={{ background:"#0e0e0e", border:"1px solid #1e1e1e", borderRadius:8, padding:"10px 14px", marginBottom:12 }}>
-      <div style={{ color:"#555", fontSize:FS.label, letterSpacing:2, marginBottom:6 }}>REPORTE LOCAL — ÚLTIMOS 5 CICLOS (sin LLM)</div>
+      <div style={{ color:"#555", fontSize:FS.label, letterSpacing:2, marginBottom:6 }}>
+        REPORTE LOCAL — ÚLTIMOS 5 CICLOS VÁLIDOS (sin LLM)
+        {failedCount > 0 && <span style={{ color:"#ff6b6b", marginLeft:8 }}>⚠ {failedCount} ciclos fallidos excluidos</span>}
+      </div>
       <div style={{ fontFamily:"monospace", fontSize:FS.xs, lineHeight:1.9 }}>
         <div style={{ color:"#e07b54" }}>J: {fmt(J)}</div>
         <div style={{ color:"#54a0e0" }}>H: {fmt(Hh)}</div>
         <div style={{ color:"#c97be0" }}>conv: {fmt(C)}</div>
       </div>
-      {last5[last5.length-1].observation && (
+      {last5[last5.length-1]?.observation && (
         <div style={{ color:"#7a9a7a", fontSize:FS.xs, fontStyle:"italic", marginTop:8, borderTop:"1px solid #1a1a1a", paddingTop:8, lineHeight:1.6 }}>
           ◎ {last5[last5.length-1].observation}
         </div>
@@ -1009,7 +1173,15 @@ function LocalReport({ history }) {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const DEFAULT_PARAMS = { temperature:0.58, initAnclaje:0.30, anclajeDecayPenalty:0.016, memoryDepth:4, convergenceTarget:0.30 };
+const DEFAULT_PARAMS = {
+  temperature: 0.58,
+  initAnclaje: 0.30,
+  anclajeDecayPenalty: 0.016,
+  memoryDepth: 4,
+  convergenceTarget: 0.20,       // recalibrado: 0.30→0.20 (alcanzable según datos)
+  customVocabEnabled: false,
+  customVocab: VOCAB_BUDDHIST.split(",").map(s=>s.trim()),
+};
 const stripPreset = p => { const { label, keyHint, ...rest } = p; return rest; };
 
 export default function LacanMASv9() {
@@ -1107,6 +1279,12 @@ export default function LacanMASv9() {
         <div style={{ color:"#555", fontSize:FS.label, letterSpacing:3, textTransform:"uppercase", marginBottom:4 }}>Sistema Multiagente v9 · Instrumento</div>
         <h1 style={{ margin:0, fontSize:FS.xl, fontWeight:600, color:"#e0c97b" }}>Métricas Determinísticas</h1>
         <div style={{ color:"#555", fontSize:FS.sm, marginTop:4, fontStyle:"italic" }}>Multi-proveedor · Seed · Batch CSV · Ningún LLM mide</div>
+        {params.customVocabEnabled && params.customVocab?.length > 0 && (
+          <div style={{ marginTop:6, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            <span style={{ color:"#c97be0", fontSize:FS.label, letterSpacing:1 }}>⟳ VOCAB ROTADO</span>
+            <span style={{ color:"#7a4a8a", fontSize:FS.xs }}>{params.customVocab.slice(0,6).join(" · ")}{params.customVocab.length>6?` +${params.customVocab.length-6}`:""}</span>
+          </div>
+        )}
       </div>
 
       <ModeSelector mode={mode} onChange={handleModeChange} disabled={running||autoRun} />
